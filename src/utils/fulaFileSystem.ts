@@ -9,27 +9,48 @@ import init, {
   read_file_native,
 } from '@functionland/wnfslib-web';
 
-class FulaDatastore {
+export class FulaDatastore {
   private store: Map<string, Uint8Array> = new Map();
   private totalBytesPut = 0;
   private totalBytesGet = 0;
   private readonly ipfsGatewayUrl: string = 'https://ipfs.cloud.fx.land/gateway';
 
-  // Simulates storing data and returns the CID
   async put(cid: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
-    const cidString = this.cidToString(cid); // Convert CID Uint8Array to string
+    const cidString = this.cidToString(cid);
     this.store.set(cidString, data);
     this.totalBytesPut += data.length;
 
-    console.log('put', { cid: cid, data: data });
+    // Also store in localStorage
+    try {
+      localStorage.setItem(`wnfs_data_${cidString}`, this.encodeToBase64(data));
+    } catch (error) {
+      console.warn('Failed to store data in localStorage:', error);
+    }
 
-    return cid; // Return the original CID as confirmation
+    console.log('put', { cid: cid, data: data });
+    return cid;
   }
 
-  // Retrieves data by CID using an external IPFS gateway
   async get(cid: Uint8Array): Promise<Uint8Array> {
-    const cidString = this.cidToString(cid); // Convert CID Uint8Array to string
+    const cidString = this.cidToString(cid);
 
+    // First check in-memory store
+    const memoryData = this.store.get(cidString);
+    if (memoryData) {
+      console.log('get from memory', { cid: cid, base64Data: this.encodeToBase64(memoryData) });
+      return memoryData;
+    }
+
+    // Then check localStorage
+    const localData = localStorage.getItem(`wnfs_data_${cidString}`);
+    if (localData) {
+      const decodedData = this.base64ToUint8Array(localData);
+      this.store.set(cidString, decodedData); // Cache in memory
+      console.log('get from localStorage', { cid: cid, base64Data: localData });
+      return decodedData;
+    }
+
+    // Finally, fetch from remote
     try {
       const response = await fetch(`${this.ipfsGatewayUrl}/${cidString}`);
       if (!response.ok) {
@@ -38,8 +59,15 @@ class FulaDatastore {
       const data = new Uint8Array(await response.arrayBuffer());
       this.totalBytesGet += data.length;
 
-      console.log('get', { cid: cid, base64Data: this.encodeToBase64(data) });
+      // Cache the fetched data
+      this.store.set(cidString, data);
+      try {
+        localStorage.setItem(`wnfs_data_${cidString}`, this.encodeToBase64(data));
+      } catch (error) {
+        console.warn('Failed to cache data in localStorage:', error);
+      }
 
+      console.log('get from remote', { cid: cid, base64Data: this.encodeToBase64(data) });
       return data;
     } catch (error) {
       console.error(`Error fetching data for CID: ${cidString}`, error);
@@ -47,22 +75,27 @@ class FulaDatastore {
     }
   }
 
-  // Helper method to encode Uint8Array to Base64
-  // Helper method to encode Uint8Array to Base64
+  private base64ToUint8Array(base64: string): Uint8Array {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  }
+
   private encodeToBase64(bytes: Uint8Array): string {
     return encodeBase64(bytes);
   }
 
-  // Helper method to convert a Uint8Array (binary CID) to a string representation (CIDv1)
   public cidToString(bytes: Uint8Array): string {
-    const cid = CID.decode(bytes); // Decode binary CID into a CID object
-    return cid.toString(); // Convert CID object to its string representation (default is CIDv1)
+    const cid = CID.decode(bytes);
+    return cid.toString();
   }
 
-  // Helper method to convert a string representation (CIDv1) back to a Uint8Array
   public stringToCid(str: string): Uint8Array {
-    const cid = CID.parse(str); // Parse the string into a CID object
-    return cid.bytes; // Get the binary representation of the CID as Uint8Array
+    const cid = CID.parse(str);
+    return cid.bytes;
   }
 
   getTotalBytesPut(): number {
@@ -75,7 +108,7 @@ class FulaDatastore {
 }
 
 
-class FileManager {
+export class FileManager {
   constructor(private jsClient: any, private wnfsKey: Uint8Array) {}
 
   // Initialize the WebAssembly module and setup datastore
@@ -104,7 +137,7 @@ class FileManager {
       for (const [name, metadata] of files) {
         const id = this.generateId(name);
         const isFolder = !name.includes('.'); // Determine if it's a folder based on the name
-
+  
         folderData[id] = {
           type: isFolder ? '__folder__' : '__file__',
           name,
@@ -124,10 +157,14 @@ class FileManager {
       }
       
     } catch (error) {
+      if ((error instanceof Error && error.message.includes('Cannot find file or directory')) || error.includes('Cannot find file or directory')) {
+        console.warn(`Directory not found: ${path}. Returning empty array.`);
+        return {};
+      }
       console.error('Error generating folder data:', error);
       throw error;
     }
-
+  
     return folderData;
   }
 
